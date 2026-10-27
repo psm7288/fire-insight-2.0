@@ -7,7 +7,7 @@ import streamlit as st
 
 
 # ==========================================
-# 1. 페이지 설정
+# 1. 페이지 설정 및 경로
 # ==========================================
 
 st.set_page_config(
@@ -18,14 +18,13 @@ st.set_page_config(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_PATH = BASE_DIR / "data/deploy/fire_dashboard.parquet"
+REPORT_DIR = BASE_DIR / "reports"
 
-DATA_PATH = (
-        BASE_DIR / "data" / "processed"
-        / "fire_industrial_clean.parquet"
-)
-
-STAT_PATH = BASE_DIR / "reports" / "statistical_test_results.csv"
-QUALITY_PATH = BASE_DIR / "reports" / "data_quality.csv"
+STAT_PATH = REPORT_DIR / "statistical_test_results.csv"
+QUALITY_PATH = REPORT_DIR / "data_quality.csv"
+SUMMARY_PATH = REPORT_DIR / "preprocessing_summary.csv"
+VALIDATION_PATH = REPORT_DIR / "preprocessing_validation.csv"
 
 BLUE = "#2563EB"
 GRAY = "#94A3B8"
@@ -35,7 +34,7 @@ DAMAGE_COL = "재산피해(천원)"
 
 
 # ==========================================
-# 2. 공통 함수
+# 2. 데이터 로딩 및 공통 함수
 # ==========================================
 
 @st.cache_data
@@ -49,6 +48,7 @@ def load_report(path):
 
 
 def format_money(value):
+    """천 원 단위의 피해액을 원화로 표시한다."""
     if pd.isna(value):
         return "자료 없음"
 
@@ -56,10 +56,8 @@ def format_money(value):
 
     if abs(won) >= 100_000_000:
         return f"{won / 100_000_000:,.2f}억 원"
-
     if abs(won) >= 10_000:
         return f"{won / 10_000:,.0f}만 원"
-
     return f"{won:,}원"
 
 
@@ -69,7 +67,6 @@ def show_chart(fig):
         font=dict(size=13),
         margin=dict(l=20, r=20, t=60, b=30)
     )
-
     st.plotly_chart(fig, width="stretch")
 
 
@@ -79,19 +76,22 @@ def reset_filters():
 
 
 # ==========================================
-# 3. 데이터 불러오기
+# 3. 데이터 검증
 # ==========================================
 
 if not DATA_PATH.exists():
-    st.error("분석용 Parquet 파일이 없습니다.")
+    st.error("배포용 데이터 파일을 찾을 수 없습니다.")
+    st.code(str(DATA_PATH))
+    st.info(
+        "src/10_prepare_deployment_data.py를 실행해 "
+        "배포용 Parquet 파일을 생성해 주세요."
+    )
     st.stop()
 
 df = load_data()
 
 required_columns = [
-    "조사서번호",
     "발화요인",
-    "건물구조조",
     BUILDING_COL,
     DAMAGE_COL,
     "인명피해(명)",
@@ -106,12 +106,17 @@ missing_columns = [
 ]
 
 if missing_columns:
-    st.error(f"필수 컬럼이 없습니다: {missing_columns}")
-    st.info(
-        "03_clean_data.py를 다시 실행하여 "
-        "전처리 데이터를 갱신해 주세요."
-    )
+    st.error(f"필수 컬럼 누락: {missing_columns}")
     st.stop()
+
+# 수치형 데이터 검증
+for col in [
+    DAMAGE_COL,
+    "인명피해(명)",
+    "사망",
+    "부상"
+]:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
 
 
 # ==========================================
@@ -167,59 +172,39 @@ if selected_buildings:
     ]
 
 st.sidebar.divider()
-
 st.sidebar.metric(
     "현재 조회 데이터",
     f"{len(filtered_df):,}건"
 )
 
 st.sidebar.caption(
-    "선택하지 않은 필터는 전체 범주를 포함합니다. "
+    "필터 미선택 시 전체 데이터를 표시합니다. "
     "두 필터는 AND 조건으로 적용됩니다."
 )
 
 
 # ==========================================
-# 5. 메인 화면
+# 5. 메인 화면 및 KPI
 # ==========================================
 
 st.title("🔥 Fire Insight 2.0")
-
-st.subheader(
-    "산업시설 화재 발생 특성 및 피해 심각도 분석"
-)
+st.subheader("산업시설 화재 발생 특성 및 피해 심각도 분석")
 
 st.caption(
     "데이터 출처: 소방청 화재 데이터 | "
     "분석 대상: 산업시설 화재"
 )
 
-
-# ==========================================
-# 6. 피해액 통계 계산
-# ==========================================
-
-all_damage = pd.to_numeric(
-    df[DAMAGE_COL], errors="coerce"
-)
-
-all_damage = all_damage[
-    all_damage.notna() & (all_damage >= 0)
-    ]
+all_damage = df[DAMAGE_COL].dropna()
+all_damage = all_damage[all_damage >= 0]
 
 threshold_90 = all_damage.quantile(0.90)
 threshold_99 = all_damage.quantile(0.99)
 
-damage = pd.to_numeric(
-    filtered_df[DAMAGE_COL], errors="coerce"
-)
-
-valid_damage = damage[
-    damage.notna() & (damage >= 0)
-    ]
+valid_damage = filtered_df[DAMAGE_COL].dropna()
+valid_damage = valid_damage[valid_damage >= 0]
 
 total_damage = valid_damage.sum()
-
 top_damage = valid_damage[
     valid_damage >= threshold_99
     ].sum()
@@ -229,49 +214,41 @@ top_share = (
     if total_damage > 0 else 0.0
 )
 
-
-# ==========================================
-# 7. 핵심 KPI
-# ==========================================
-
 col1, col2, col3, col4 = st.columns(4)
 
 col1.metric(
     "화재 발생 건수",
     f"{len(filtered_df):,}건"
 )
-
 col2.metric(
     "평균 재산피해",
     format_money(valid_damage.mean())
 )
-
 col3.metric(
     "중앙값 재산피해",
     format_money(valid_damage.median())
 )
-
 col4.metric(
-    "전체 99백분위 이상 피해 점유율",
+    "99백분위 이상 피해 점유율",
     f"{top_share:.2f}%" if not filtered_df.empty else "—"
 )
 
 st.caption(
-    "피해 점유율은 전체 산업시설 데이터의 "
-    "99백분위 기준을 현재 필터 결과에 적용합니다."
+    "99백분위 기준은 전체 데이터로 계산하며, "
+    "피해 점유율은 현재 필터 결과에서 산출합니다."
 )
 
 if filtered_df.empty:
     st.warning(
-        "현재 조건에 해당하는 데이터가 없습니다. "
-        "사이드바의 필터 초기화 버튼을 눌러주세요."
+        "현재 필터 조건에 해당하는 데이터가 없습니다. "
+        "필터를 초기화하거나 조건을 변경해 주세요."
     )
 
 st.divider()
 
 
 # ==========================================
-# 8. 분석 탭
+# 6. 분석 탭
 # ==========================================
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -288,12 +265,10 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # ==========================================
 
 with tab1:
-
     st.header("01. 발화요인별 화재 발생 현황")
 
     if filtered_df.empty:
         st.info("표시할 데이터가 없습니다.")
-
     else:
         cause_count = (
             filtered_df["발화요인"]
@@ -309,12 +284,7 @@ with tab1:
             title="발화요인별 화재 발생 건수",
             color_discrete_sequence=[BLUE]
         )
-
         show_chart(fig1)
-
-        # ----------------------------------
-        # 건물구조별 발생 건수
-        # ----------------------------------
 
         st.header("02. 건물구조별 화재 발생 현황")
 
@@ -330,27 +300,21 @@ with tab1:
             building_count,
             x="건물구조",
             y="발생건수",
-            title="건물구조별 화재 발생 건수 TOP 10",
+            title="표준화 건물구조별 화재 발생 건수 TOP 10",
             color_discrete_sequence=[BLUE]
         )
-
         show_chart(fig2)
 
         st.caption(
-            "건물구조별 발생 건수는 시설 수를 "
-            "보정한 화재 발생률이 아닙니다."
+            "건물구조별 발생 건수는 전체 시설 수를 "
+            "보정한 화재 발생 위험률이 아닙니다."
         )
 
-        # ==================================
-        # 03. 건물구조별 피해 심각도
-        # ==================================
+        # ----------------------------------
+        # 건물구조별 피해 심각도
+        # ----------------------------------
 
         st.header("03. 건물구조별 피해 심각도")
-
-        st.caption(
-            "현재 사이드바 필터가 적용된 데이터를 "
-            "기준으로 피해 심각도를 분석합니다."
-        )
 
         min_samples = st.slider(
             "최소 화재 발생 건수",
@@ -374,7 +338,7 @@ with tab1:
         building_risk = (
             building_df.groupby(BUILDING_COL)
             .agg(
-                발생건수=("조사서번호", "size"),
+                발생건수=(DAMAGE_COL, "size"),
                 중앙값재산피해=(DAMAGE_COL, "median"),
                 대형피해비율=("대형피해발생", "mean"),
                 인명피해발생비율=("인명피해발생", "mean")
@@ -391,11 +355,9 @@ with tab1:
 
         if building_risk.empty:
             st.warning(
-                "현재 조건에서 최소 표본 수를 "
-                "충족하는 건물구조가 없습니다. "
+                "최소 표본 수를 충족하는 건물구조가 없습니다. "
                 "슬라이더 값을 낮춰주세요."
             )
-
         else:
             metric_options = {
                 "대형 피해 발생 비율 (%)": "대형피해비율",
@@ -425,7 +387,6 @@ with tab1:
                 color_discrete_sequence=[BLUE],
                 hover_data=["발생건수"]
             )
-
             show_chart(fig_risk)
 
             st.dataframe(
@@ -434,21 +395,14 @@ with tab1:
             )
 
             st.caption(
-                f"대형 피해 기준은 전체 데이터의 "
-                f"90백분위({threshold_90:,.0f}천 원 이상)입니다. "
-                "최소 표본 수는 탐색적 비교를 위한 설정입니다."
+                f"대형 피해 기준: 전체 데이터 90백분위 "
+                f"({threshold_90:,.0f}천 원 이상). "
+                "최소 표본 수는 탐색적 비교 기준입니다."
             )
-
-        # ----------------------------------
-        # 분석 데이터
-        # ----------------------------------
 
         st.header("04. 분석 데이터 조회")
 
-        st.dataframe(
-            filtered_df,
-            width="stretch"
-        )
+        st.dataframe(filtered_df, width="stretch")
 
         st.download_button(
             "📥 필터링 데이터 CSV 다운로드",
@@ -465,12 +419,10 @@ with tab1:
 # ==========================================
 
 with tab2:
-
     st.header("01. 발화요인별 재산피해 비교")
 
     if filtered_df.empty:
         st.info("표시할 재산피해 데이터가 없습니다.")
-
     else:
         damage_stats = (
             filtered_df.groupby("발화요인")[DAMAGE_COL]
@@ -500,18 +452,16 @@ with tab2:
                 "중앙값피해": GRAY
             }
         )
-
         show_chart(fig3)
 
         st.info(
-            "일부 대형 화재가 평균 피해액에 "
-            "큰 영향을 주므로 중앙값도 함께 비교합니다."
+            "일부 대형 화재가 평균 피해액에 큰 영향을 "
+            "미치므로 중앙값을 함께 비교합니다."
         )
 
         st.header("02. 대형 피해 발생 비율")
 
         damage_df = filtered_df.copy()
-
         damage_df["대형피해"] = (
                 damage_df[DAMAGE_COL] >= threshold_90
         )
@@ -519,12 +469,11 @@ with tab2:
         large_stats = (
             damage_df.groupby("발화요인")
             .agg(
-                발생건수=("조사서번호", "size"),
+                발생건수=(DAMAGE_COL, "size"),
                 대형피해비율=("대형피해", "mean")
             )
             .reset_index()
         )
-
         large_stats["대형피해비율"] *= 100
 
         fig4 = px.bar(
@@ -535,12 +484,11 @@ with tab2:
             title="발화요인별 대형 피해 발생 비율",
             color_discrete_sequence=[BLUE]
         )
-
         show_chart(fig4)
 
         st.caption(
-            f"대형 피해 기준: 전체 데이터의 "
-            f"90백분위({threshold_90:,.0f}천 원 이상). "
+            f"대형 피해 기준: 전체 데이터의 90백분위 "
+            f"({threshold_90:,.0f}천 원 이상). "
             "공식 대형 화재 분류 기준은 아닙니다."
         )
 
@@ -559,12 +507,11 @@ with tab2:
             title="연소확대범위별 재산피해 중앙값",
             color_discrete_sequence=[BLUE]
         )
-
         show_chart(fig5)
 
         st.caption(
-            "연소확대범위와 피해 규모 사이의 "
-            "관측된 연관성을 나타냅니다."
+            "연소확대범위와 재산피해의 관계는 "
+            "관측된 연관성이며 인과관계를 의미하지 않습니다."
         )
 
 
@@ -573,12 +520,10 @@ with tab2:
 # ==========================================
 
 with tab3:
-
     st.header("01. 발화요인별 인명피해 분석")
 
     if filtered_df.empty:
         st.info("표시할 인명피해 데이터가 없습니다.")
-
     else:
         casualty_df = filtered_df.copy()
 
@@ -589,7 +534,7 @@ with tab3:
         casualty_stats = (
             casualty_df.groupby("발화요인")
             .agg(
-                발생건수=("조사서번호", "size"),
+                발생건수=(DAMAGE_COL, "size"),
                 인명피해발생건수=("인명피해발생", "sum"),
                 총사망자=("사망", "sum"),
                 총부상자=("부상", "sum")
@@ -608,10 +553,9 @@ with tab3:
 
         if casualty_plot.empty:
             st.info(
-                "현재 필터에서 100건 이상인 "
+                "현재 필터 조건에서 100건 이상인 "
                 "발화요인이 없습니다."
             )
-
         else:
             fig6 = px.bar(
                 casualty_plot,
@@ -626,7 +570,6 @@ with tab3:
             fig6.update_traces(
                 texttemplate="%{text:.2f}%"
             )
-
             show_chart(fig6)
 
         st.dataframe(
@@ -634,9 +577,12 @@ with tab3:
             width="stretch"
         )
 
+
         st.caption(
-            "인명피해 발생 비율은 사망자 또는 부상자가 "
-            "1명 이상 발생한 화재의 비율입니다."
+            "인명피해 발생 비율은 인명피해가 "
+            "1명 이상 발생한 화재의 비율입니다. "
+            "그래프는 발생 건수 100건 이상인 "
+            "발화요인만 표시합니다."
         )
 
 
@@ -646,9 +592,10 @@ with tab3:
 
 with tab4:
 
-    st.header("통계적 검정 결과")
+    st.header("01. 통계적 검정 결과")
 
     if STAT_PATH.exists():
+
         stat_df = load_report(STAT_PATH)
 
         st.dataframe(
@@ -657,15 +604,15 @@ with tab4:
         )
 
         st.info(
-            "p값이 작더라도 효과크기가 작다면 "
-            "실질적인 연관성이 크다고 단정할 수 없습니다."
+            "통계적으로 유의한 결과라도 "
+            "효과크기가 작으면 실질적인 차이가 "
+            "크다고 단정할 수 없습니다."
         )
 
-
         st.caption(
-            "전체 산업시설 화재 데이터를 기준으로 "
-            "계산한 결과입니다. 사이드바 필터는 "
-            "통계 검정 결과에 적용되지 않습니다."
+            "통계 검정 결과는 전체 산업시설 화재 "
+            "24,678건을 기준으로 계산됐습니다. "
+            "사이드바 필터는 적용되지 않습니다."
         )
 
         st.warning(
@@ -675,9 +622,14 @@ with tab4:
         )
 
     else:
+
         st.error(
-            "통계 검정 결과 CSV 파일이 없습니다. "
-            "07_statistical_analysis.py를 실행해 주세요."
+            "통계 검정 결과 CSV 파일이 없습니다."
+        )
+
+        st.info(
+            "src/07_statistical_analysis.py를 "
+            "실행해 주세요."
         )
 
 
@@ -728,9 +680,9 @@ with tab5:
         )
 
     else:
+
         st.error(
-            "데이터 품질 보고서가 없습니다. "
-            "02_preprocessing.py를 실행해 주세요."
+            "데이터 품질 보고서 CSV가 없습니다."
         )
 
     # ======================================
@@ -739,25 +691,76 @@ with tab5:
 
     st.header("02. 데이터 전처리 현황")
 
-    pre1, pre2, pre3 = st.columns(3)
+    if SUMMARY_PATH.exists():
 
-    pre1.metric(
-        "산업시설 추출 데이터",
-        "24,678건"
-    )
+        summary_df = load_report(SUMMARY_PATH)
 
-    pre2.metric(
-        "전처리 후 데이터",
-        f"{len(df):,}건"
-    )
+        st.dataframe(
+            summary_df,
+            width="stretch"
+        )
 
-    pre3.metric(
-        "전처리 후 컬럼",
-        f"{len(df.columns)}개"
-    )
+    else:
+
+        st.info(
+            "preprocessing_summary.csv 파일이 없습니다."
+        )
+
+    # ======================================
+    # 03. 전처리 검증 결과
+    # ======================================
+
+    st.header("03. 전처리 검증 결과")
+
+    if VALIDATION_PATH.exists():
+
+        validation_df = load_report(VALIDATION_PATH)
+
+        st.dataframe(
+            validation_df,
+            width="stretch"
+        )
+
+        passed = validation_df["통과 여부"].astype(
+            str
+        ).str.lower().eq("true")
+
+        total_checks = len(validation_df)
+        passed_checks = int(passed.sum())
+
+        col_a, col_b = st.columns(2)
+
+        col_a.metric(
+            "전체 검증 항목",
+            f"{total_checks}개"
+        )
+
+        col_b.metric(
+            "검증 통과",
+            f"{passed_checks}개"
+        )
+
+        if passed.all():
+            st.success("모든 전처리 검증 항목 통과")
+        else:
+            st.warning(
+                "일부 전처리 검증 항목을 확인해야 합니다."
+            )
+
+    else:
+
+        st.info(
+            "preprocessing_validation.csv 파일이 없습니다."
+        )
+
+    # ======================================
+    # 04. 주요 전처리 작업
+    # ======================================
+
+    st.header("04. 주요 데이터 전처리 작업")
 
     st.markdown("""
-**주요 전처리 작업**
+**데이터 전처리 및 품질 관리**
 
 - 산업시설 화재 데이터 추출
 - 조사서번호 중복 검사
@@ -767,64 +770,21 @@ with tab5:
 - 건물구조 표준화 (`기타/미분류`)
 - 소방설비 관련 결측 여부 컬럼 생성
 - Parquet 형식으로 분석용 데이터 저장
+- 전처리 전후 데이터 무결성 검증
 """)
 
+    st.caption(
+        "배포용 데이터는 원본 분석용 데이터에서 "
+        "대시보드에 필요한 7개 컬럼만 추출했습니다. "
+        "전처리 결과와 검증 통계는 별도의 "
+        "보고서 CSV에서 불러옵니다."
+    )
+
     st.warning(
-        "발화층의 괄호 표기를 지하층으로 분류한 "
-        "규칙은 공식 코드 정의 확인 전까지 "
-        "잠정적인 해석입니다."
-    )
-
-    # ======================================
-    # 03. 건물구조 표준화 검증
-    # ======================================
-
-    st.header("03. 건물구조 표준화 결과")
-
-    original_count = df["건물구조조"].nunique()
-    standardized_count = df[BUILDING_COL].nunique()
-
-    col_a, col_b = st.columns(2)
-
-    col_a.metric(
-        "표준화 전 범주 수",
-        f"{original_count}개"
-    )
-
-    col_b.metric(
-        "표준화 후 범주 수",
-        f"{standardized_count}개"
-    )
-
-    st.caption(
-        "원본 건물구조 데이터는 보존하고 "
-        "분석용 표준화 컬럼을 추가했습니다."
-    )
-
-    building_mapping = (
-        df.groupby(["건물구조조", BUILDING_COL])
-        .size()
-        .reset_index(name="화재건수")
-        .rename(columns={
-            "건물구조조": "원본 건물구조",
-            BUILDING_COL: "표준화 건물구조"
-        })
-        .sort_values(
-            "화재건수",
-            ascending=False
-        )
-    )
-
-    st.dataframe(
-        building_mapping,
-        width="stretch"
-    )
-
-    st.caption(
-        "기타 계열은 분석 편의를 위해 "
-        "'기타/미분류'로 통합했습니다. "
-        "공식 건축구조 분류의 동등성을 "
-        "의미하지는 않습니다."
+        "배포용 데이터의 식별자 제거만으로 "
+        "완전한 익명화가 보장되지는 않습니다. "
+        "공개 전 재식별 위험과 데이터 이용 조건을 "
+        "검토해야 합니다."
     )
 
 

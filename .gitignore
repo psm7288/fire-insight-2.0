@@ -30,3 +30,6 @@ data/processed/*
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/processed/.gitkeep
+
+# 배포용 데이터 - 공개 검토 전 업로드 금지
+data/deploy/
